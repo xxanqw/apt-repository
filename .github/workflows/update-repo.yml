@@ -34,6 +34,11 @@ jobs:
         run: |
           echo "$GPG_PRIVATE_KEY" | gpg --import --batch
           echo "GPG key imported successfully"
+          
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent
+          gpgconf --launch gpg-agent
 
       - name: Create repository structure
         run: |
@@ -121,7 +126,7 @@ jobs:
           wget -O - https://xxanqw.github.io/mikusays-apt-repo/public.asc | sudo gpg --dearmor -o /usr/share/keyrings/mikusays-archive-keyring.gpg
 
           # Add the repository
-          echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mikusays-archive-keyring.gpg] https://xxanqw.github.io/mikusays-apt-repo/repo stable main" | sudo tee /etc/apt/sources.list.d/mikusays.list
+          echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mikusays-archive-keyring.gpg] https://xxanqw.github.io/apt-repository/repo stable main" | sudo tee /etc/apt/sources.list.d/mikusays.list
 
           # Update package list
           sudo apt update
