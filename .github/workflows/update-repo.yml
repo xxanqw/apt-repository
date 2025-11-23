@@ -26,39 +26,46 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev apt-utils gnupg2 curl jq rpm createrepo-c expect
+          # Removed 'expect' and 'tcl-expect', added 'gpg-agent'
+          sudo apt-get install -y dpkg-dev apt-utils gnupg2 gpg-agent curl jq rpm createrepo-c
 
-      - name: Import GPG key
+      - name: Import GPG key & Preset Passphrase
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
+          # 1. Setup GPG Home
           export GNUPGHOME="${HOME}/.gnupg"
+          echo "GNUPGHOME=$GNUPGHOME" >> $GITHUB_ENV
           mkdir -p "$GNUPGHOME"
           chmod 700 "$GNUPGHOME"
-          
-          # Import Key
+
+          # 2. Import Key
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
 
-          # Configure GPG Agent
-          echo "allow-loopback-pinentry" >> "$GNUPGHOME/gpg-agent.conf"
-          echo "pinentry-mode loopback" >> "$GNUPGHOME/gpg.conf"
+          # 3. Configure Agent to allow presetting (no loopback config needed for RPM)
+          echo "allow-preset-passphrase" >> "$GNUPGHOME/gpg-agent.conf"
           
-          # Restart agent
+          # Restart agent to apply config
           gpgconf --kill gpg-agent || true
           gpgconf --launch gpg-agent || true
 
-          # Create expect script for RPM signing
-          cat <<EOF > sign-rpm.exp
-          #!/usr/bin/expect -f
-          spawn rpmsign --addsign {*}\$argv
-          expect -exact "Enter pass phrase: "
-          send -- "$GPG_PASSPHRASE\r"
-          expect eof
-          EOF
-          chmod +x sign-rpm.exp
+          # 4. Extract Keygrip (internal ID used by the agent)
+          KEYGRIP=$(gpg --list-secret-keys --with-colons | grep '^grp:' | awk -F: '{print $10}' | head -n 1)
+          
+          # 5. Preset the passphrase
+          # Find the preset helper (location varies by distro)
+          PRESET_CMD=$(find /usr -name gpg-preset-passphrase -type f -executable -print -quit)
+          
+          if [ -z "$PRESET_CMD" ]; then
+            echo "Error: gpg-preset-passphrase not found"
+            exit 1
+          fi
+          
+          echo "Presetting passphrase for keygrip..."
+          "$PRESET_CMD" --preset --passphrase "$GPG_PASSPHRASE" "$KEYGRIP"
 
-          # Configure RPM macros
+          # 6. Configure RPM macros to use this GPG setup
           echo "%_signature gpg" > ~/.rpmmacros
           echo "%_gpg_name $GPG_KEY_ID" >> ~/.rpmmacros
           echo "%_gpg_path $GNUPGHOME" >> ~/.rpmmacros
@@ -66,13 +73,13 @@ jobs:
       # ==========================================
       # SECTION: APT (DEBIAN/UBUNTU)
       # ==========================================
-      - name: (APT) Create structure
+      - name: APT - Create structure
         run: |
           mkdir -p repo/pool/main
           mkdir -p repo/dists/stable/main/binary-amd64
           mkdir -p repo/dists/stable/main/binary-arm64
 
-      - name: (APT) Download DEBs
+      - name: APT - Download DEBs
         run: |
           RELEASE_DATA=$(curl -s "https://api.github.com/repos/$SOURCE_REPO/releases/latest")
           DEBS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url')
@@ -85,7 +92,7 @@ jobs:
             echo "No DEB files found, skipping APT download."
           fi
 
-      - name: (APT) Generate Metadata
+      - name: APT - Generate Metadata
         run: |
           cd repo
           dpkg-scanpackages -m pool/ > dists/stable/main/binary-amd64/Packages
@@ -93,7 +100,7 @@ jobs:
           dpkg-scanpackages -m pool/ > dists/stable/main/binary-arm64/Packages
           gzip -kf dists/stable/main/binary-arm64/Packages
 
-      - name: (APT) Generate Release & Sign
+      - name: APT - Generate Release & Sign
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
@@ -108,13 +115,14 @@ jobs:
           EOF
           apt-ftparchive -c apt-ftparchive.conf release . > Release
           
+          # Note: pinentry-mode loopback is fine here for GPG direct calls
           gpg --batch --yes --default-key "$GPG_KEY_ID" --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --armor --detach-sign --output Release.gpg Release
           gpg --batch --yes --default-key "$GPG_KEY_ID" --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --clearsign --output InRelease Release
 
       # ==========================================
       # SECTION: RPM (FEDORA/RHEL)
       # ==========================================
-      - name: (RPM) Create structure & Download
+      - name: RPM - Create structure & Download
         run: |
           mkdir -p rpm_repo
           
@@ -131,18 +139,19 @@ jobs:
             echo "No RPM files found."
           fi
 
-      - name: (RPM) Sign Packages
+      - name: RPM - Sign Packages
         run: |
           cd rpm_repo
           if ls *.rpm 1> /dev/null 2>&1; then
-            ../sign-rpm.exp *.rpm
+            # Password is already loaded in agent, so this runs without prompt
+            rpmsign --addsign *.rpm
           fi
 
-      - name: (RPM) Generate Metadata
+      - name: RPM - Generate Metadata
         run: |
           createrepo_c rpm_repo/
 
-      - name: (RPM) Generate .repo file
+      - name: RPM - Generate .repo file
         run: |
           cat <<EOF > rpm_repo/xxanqw.repo
           [xxanqw]
