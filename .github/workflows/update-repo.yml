@@ -1,0 +1,154 @@
+name: Update APT Repository
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: '0 */6 * * *'  # Run every 6 hours to check for new releases
+  repository_dispatch:
+    types: [new-release]  # Can be triggered by main repo
+
+env:
+  SOURCE_REPO: xxanqw/mikusays
+  GPG_KEY_ID: 1400C594BC446805BD928F020B493CCBC94A2D44
+
+jobs:
+  update-repo:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    
+    steps:
+      - name: Checkout APT repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev gnupg curl jq
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --import --batch
+          echo "GPG key imported successfully"
+
+      - name: Create repository structure
+        run: |
+          mkdir -p repo/pool/main
+          mkdir -p repo/dists/stable/main/binary-amd64
+          mkdir -p repo/dists/stable/main/binary-arm64
+
+      - name: Download DEB packages from latest release
+        run: |
+          echo "Fetching latest release from $SOURCE_REPO..."
+          RELEASE_DATA=$(curl -s "https://api.github.com/repos/$SOURCE_REPO/releases/latest")
+          
+          # Extract DEB download URLs
+          DEBS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url')
+          
+          if [ -z "$DEBS" ]; then
+            echo "No DEB packages found in latest release"
+            exit 1
+          fi
+          
+          echo "Downloading DEB packages..."
+          cd repo/pool/main
+          for url in $DEBS; do
+            echo "Downloading: $url"
+            curl -L -O "$url"
+          done
+          
+          ls -lh
+          cd ../../..
+
+      - name: Generate Packages files
+        run: |
+          cd repo
+          
+          # Generate Packages file for amd64
+          dpkg-scanpackages --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
+          gzip -kf dists/stable/main/binary-amd64/Packages
+          
+          # Generate Packages file for arm64
+          dpkg-scanpackages --arch arm64 pool/ > dists/stable/main/binary-arm64/Packages
+          gzip -kf dists/stable/main/binary-arm64/Packages
+          
+          cd ..
+
+      - name: Generate Release file
+        run: |
+          cd repo/dists/stable
+          
+          cat > Release <> Release
+          find main -type f -exec md5sum {} \; | sed 's|main/| |' | awk '{print $1, $3, $2}' >> Release
+          
+          echo "SHA1:" >> Release
+          find main -type f -exec sha1sum {} \; | sed 's|main/| |' | awk '{print $1, $3, $2}' >> Release
+          
+          echo "SHA256:" >> Release
+          find main -type f -exec sha256sum {} \; | sed 's|main/| |' | awk '{print $1, $3, $2}' >> Release
+          
+          cd ../../..
+
+      - name: Sign Release file
+        run: |
+          cd repo/dists/stable
+          
+          # Sign with GPG
+          gpg --default-key $GPG_KEY_ID --armor --detach-sign --output Release.gpg Release
+          gpg --default-key $GPG_KEY_ID --clearsign --output InRelease Release
+          
+          cd ../../..
+
+      - name: Copy public key to repo
+        run: |
+          cp public.asc repo/public.asc
+
+      - name: Create installation instructions
+        run: |
+          cat > repo/README.md <<'EOF'
+          # MikuSays APT Repository
+
+          ## Installation
+
+          Add the repository to your system:
+
+          \`\`\`bash
+          # Download and add the GPG key
+          wget -O - https://xxanqw.github.io/mikusays-apt-repo/public.asc | sudo gpg --dearmor -o /usr/share/keyrings/mikusays-archive-keyring.gpg
+
+          # Add the repository
+          echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mikusays-archive-keyring.gpg] https://xxanqw.github.io/mikusays-apt-repo/repo stable main" | sudo tee /etc/apt/sources.list.d/mikusays.list
+
+          # Update package list
+          sudo apt update
+
+          # Install mikusays
+          sudo apt install mikusays
+          \`\`\`
+
+          ## Verify Installation
+
+          \`\`\`bash
+          mikusays "Hello from APT!"
+          \`\`\`
+
+          ## Uninstall
+
+          \`\`\`bash
+          sudo apt remove mikusays
+          sudo rm /etc/apt/sources.list.d/mikusays.list
+          sudo apt update
+          \`\`\`
+          EOF
+
+      - name: Upload artifact for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
