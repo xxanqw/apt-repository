@@ -18,7 +18,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    
+
     steps:
       - name: Checkout APT repo
         uses: actions/checkout@v4
@@ -26,19 +26,32 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev gnupg curl jq
+          sudo apt-get install -y dpkg-dev gnupg2 curl jq
 
       - name: Import GPG key
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          echo "$GPG_PRIVATE_KEY" | gpg --import --batch
-          echo "GPG key imported successfully"
-          
-          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
-          echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
-          gpgconf --kill gpg-agent
-          gpgconf --launch gpg-agent
+          # Ensure GNUPG home exists and is secure
+          export GNUPGHOME="${HOME}/.gnupg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+
+          # Import private key non-interactively
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+          # Ensure GPG agent allows loopback pinentry
+          # Append to configs (use >> so we don't clobber other settings)
+          echo "allow-loopback-pinentry" >> "$GNUPGHOME/gpg-agent.conf"
+          echo "pinentry-mode loopback" >> "$GNUPGHOME/gpg.conf"
+
+          # Restart gpg-agent to pick up config
+          gpgconf --kill gpg-agent || true
+          gpgconf --launch gpg-agent || true
+
+          # Optional: show imported keys (for debug)
+          gpg --list-secret-keys --keyid-format LONG
 
       - name: Create repository structure
         run: |
@@ -50,62 +63,78 @@ jobs:
         run: |
           echo "Fetching latest release from $SOURCE_REPO..."
           RELEASE_DATA=$(curl -s "https://api.github.com/repos/$SOURCE_REPO/releases/latest")
-          
+
           # Extract DEB download URLs
           DEBS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url')
-          
+
           if [ -z "$DEBS" ]; then
             echo "No DEB packages found in latest release"
             exit 1
           fi
-          
+
           echo "Downloading DEB packages..."
           cd repo/pool/main
           for url in $DEBS; do
             echo "Downloading: $url"
             curl -L -O "$url"
           done
-          
+
           ls -lh
           cd ../../..
 
       - name: Generate Packages files
         run: |
           cd repo
-          
+
           # Generate Packages file for amd64
           dpkg-scanpackages --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
           gzip -kf dists/stable/main/binary-amd64/Packages
-          
+
           # Generate Packages file for arm64
           dpkg-scanpackages --arch arm64 pool/ > dists/stable/main/binary-arm64/Packages
           gzip -kf dists/stable/main/binary-arm64/Packages
-          
+
           cd ..
 
       - name: Generate Release file
         run: |
           cd repo/dists/stable
-          
-          cat > Release <> Release
+
+          # Start Release file and add basic fields (adjust as needed)
+          cat > Release <<'EOF'
+Origin: MikuSays
+Label: MikuSays
+Suite: stable
+Version: 1
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+SignWith: {GPG_KEY}
+EOF
+
+          # Add MD5, SHA1, SHA256 listings for files under main
           find main -type f -exec md5sum {} \; | sed 's|main/| |' | awk '{print $1, $3, $2}' >> Release
-          
+
           echo "SHA1:" >> Release
           find main -type f -exec sha1sum {} \; | sed 's|main/| |' | awk '{print $1, $3, $2}' >> Release
-          
+
           echo "SHA256:" >> Release
           find main -type f -exec sha256sum {} \; | sed 's|main/| |' | awk '{print $1, $3, $2}' >> Release
-          
+
           cd ../../..
 
       - name: Sign Release file
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEY_ID: ${{ env.GPG_KEY_ID }}
         run: |
           cd repo/dists/stable
-          
-          # Sign with GPG
-          gpg --default-key $GPG_KEY_ID --armor --detach-sign --output Release.gpg Release
-          gpg --default-key $GPG_KEY_ID --clearsign --output InRelease Release
-          
+
+          # Non-interactive signing using loopback pinentry and provided passphrase
+          # --batch and --yes make gpg non-interactive; --pinentry-mode loopback allows --passphrase
+          gpg --batch --yes --default-key "$GPG_KEY_ID" --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --armor --detach-sign --output Release.gpg Release
+          gpg --batch --yes --default-key "$GPG_KEY_ID" --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --clearsign --output InRelease Release
+
           cd ../../..
 
       - name: Copy public key to repo
@@ -115,45 +144,21 @@ jobs:
       - name: Create installation instructions
         run: |
           cat > repo/README.md <<'EOF'
-          # MikuSays APT Repository
+# MikuSays APT Repository
 
-          ## Installation
+## Installation
 
-          Add the repository to your system:
+Add the repository to your system:
 
-          \`\`\`bash
-          # Download and add the GPG key
-          wget -O - https://xxanqw.github.io/mikusays-apt-repo/public.asc | sudo gpg --dearmor -o /usr/share/keyrings/mikusays-archive-keyring.gpg
+```bash
+# Download and add the GPG key
+wget -O - https://xxanqw.github.io/mikusays-apt-repo/public.asc | sudo gpg --dearmor -o /usr/share/keyrings/mikusays-archive-keyring.gpg
 
-          # Add the repository
-          echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mikusays-archive-keyring.gpg] https://xxanqw.github.io/apt-repository/repo stable main" | sudo tee /etc/apt/sources.list.d/mikusays.list
+# Add the repository
+echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mikusays-archive-keyring.gpg] https://xxanqw.github.io/apt-repository/repo stable main" | sudo tee /etc/apt/sources.list.d/mikusays.list
 
-          # Update package list
-          sudo apt update
+# Update package list
+sudo apt update
 
-          # Install mikusays
-          sudo apt install mikusays
-          \`\`\`
-
-          ## Verify Installation
-
-          \`\`\`bash
-          mikusays "Hello from APT!"
-          \`\`\`
-
-          ## Uninstall
-
-          \`\`\`bash
-          sudo apt remove mikusays
-          sudo rm /etc/apt/sources.list.d/mikusays.list
-          sudo apt update
-          \`\`\`
-          EOF
-
-      - name: Upload artifact for GitHub Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: repo
-
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+# Install mikusays
+sudo apt install mikusays
