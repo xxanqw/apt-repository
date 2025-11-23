@@ -77,7 +77,6 @@ jobs:
         run: |
           cd repo/dists/stable
           
-          # Generate configuration for apt-ftparchive
           cat <<EOF > apt-ftparchive.conf
           APT::FTPArchive::Release::Origin "xxanqw";
           APT::FTPArchive::Release::Label "xxanqw's APT Repository";
@@ -104,6 +103,7 @@ jobs:
           cp public.asc repo/public.asc
 
       - name: Create installation instructions
+        # Updated with the new apt.xxanqw.pp.ua URLs
         run: |
           cat > repo/index.html <<'EOF'
           <!DOCTYPE html>
@@ -135,10 +135,18 @@ jobs:
           </body></html>
           EOF
 
+      - name: Prepare Pages structure
+        # This step is CRITICAL to prevent 404 errors on the /repo path
+        run: |
+          mkdir _site
+          mv repo _site/repo
+          cp _site/repo/index.html _site/index.html
+          cp _site/repo/public.asc _site/public.asc
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: 'repo'
+          path: '_site'
 
       - name: Deploy to GitHub Pages
         id: deployment
