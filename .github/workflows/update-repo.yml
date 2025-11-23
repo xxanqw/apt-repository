@@ -1,4 +1,4 @@
-name: Update APT Repository
+name: Update Repositories (APT & RPM)
 
 on:
   workflow_dispatch:
@@ -20,13 +20,13 @@ jobs:
       id-token: write
 
     steps:
-      - name: Checkout APT repo
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev apt-utils gnupg2 curl jq
+          sudo apt-get install -y dpkg-dev apt-utils gnupg2 curl jq rpm createrepo-c expect
 
       - name: Import GPG key
         env:
@@ -36,120 +36,166 @@ jobs:
           export GNUPGHOME="${HOME}/.gnupg"
           mkdir -p "$GNUPGHOME"
           chmod 700 "$GNUPGHOME"
+          
+          # Import Key
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+          # Configure GPG Agent
           echo "allow-loopback-pinentry" >> "$GNUPGHOME/gpg-agent.conf"
           echo "pinentry-mode loopback" >> "$GNUPGHOME/gpg.conf"
+          
+          # Restart agent
           gpgconf --kill gpg-agent || true
           gpgconf --launch gpg-agent || true
 
-      - name: Create repository structure
+          # Create expect script for RPM signing
+          cat <<EOF > sign-rpm.exp
+          #!/usr/bin/expect -f
+          spawn rpmsign --addsign {*}\$argv
+          expect -exact "Enter pass phrase: "
+          send -- "$GPG_PASSPHRASE\r"
+          expect eof
+          EOF
+          chmod +x sign-rpm.exp
+
+          # Configure RPM macros
+          echo "%_signature gpg" > ~/.rpmmacros
+          echo "%_gpg_name $GPG_KEY_ID" >> ~/.rpmmacros
+          echo "%_gpg_path $GNUPGHOME" >> ~/.rpmmacros
+
+      # ==========================================
+      # SECTION: APT (DEBIAN/UBUNTU)
+      # ==========================================
+      - name: (APT) Create structure
         run: |
           mkdir -p repo/pool/main
           mkdir -p repo/dists/stable/main/binary-amd64
           mkdir -p repo/dists/stable/main/binary-arm64
 
-      - name: Download DEB packages from latest release
+      - name: (APT) Download DEBs
         run: |
-          echo "Fetching latest release from $SOURCE_REPO..."
           RELEASE_DATA=$(curl -s "https://api.github.com/repos/$SOURCE_REPO/releases/latest")
           DEBS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url')
-
-          if [ -z "$DEBS" ]; then
-            echo "No DEB packages found in latest release"
-            exit 1
+          
+          if [ -n "$DEBS" ]; then
+            cd repo/pool/main
+            for url in $DEBS; do curl -L -O "$url"; done
+            cd ../../..
+          else
+            echo "No DEB files found, skipping APT download."
           fi
 
-          cd repo/pool/main
-          for url in $DEBS; do
-            echo "Downloading: $url"
-            curl -L -O "$url"
-          done
-          
-          echo "--- DEBUG: Downloaded Files ---"
-          ls -lh
-          echo "-------------------------------"
-
-      - name: Generate Packages files
+      - name: (APT) Generate Metadata
         run: |
           cd repo
-          
-          # Using -m (multivers) ensures that even if arch doesn't perfectly match, it gets indexed.
-          # We scan the SAME pool for both architectures to ensure visibility.
-          
-          echo "Generating AMD64 index..."
           dpkg-scanpackages -m pool/ > dists/stable/main/binary-amd64/Packages
-          cat dists/stable/main/binary-amd64/Packages # Print to log for debugging
           gzip -kf dists/stable/main/binary-amd64/Packages
-
-          echo "Generating ARM64 index..."
           dpkg-scanpackages -m pool/ > dists/stable/main/binary-arm64/Packages
           gzip -kf dists/stable/main/binary-arm64/Packages
 
-      - name: Generate Release file
+      - name: (APT) Generate Release & Sign
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           cd repo/dists/stable
-          
           cat <<EOF > apt-ftparchive.conf
           APT::FTPArchive::Release::Origin "xxanqw";
-          APT::FTPArchive::Release::Label "xxanqw's APT Repository";
+          APT::FTPArchive::Release::Label "xxanqw APT";
           APT::FTPArchive::Release::Suite "stable";
           APT::FTPArchive::Release::Codename "stable";
           APT::FTPArchive::Release::Architectures "amd64 arm64";
           APT::FTPArchive::Release::Components "main";
-          APT::FTPArchive::Release::Description "xxanqw's personal APT repository";
           EOF
-
           apt-ftparchive -c apt-ftparchive.conf release . > Release
-
-      - name: Sign Release file
-        env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          GPG_KEY_ID: ${{ env.GPG_KEY_ID }}
-        run: |
-          cd repo/dists/stable
+          
           gpg --batch --yes --default-key "$GPG_KEY_ID" --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --armor --detach-sign --output Release.gpg Release
           gpg --batch --yes --default-key "$GPG_KEY_ID" --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --clearsign --output InRelease Release
 
-      - name: Copy public key
+      # ==========================================
+      # SECTION: RPM (FEDORA/RHEL)
+      # ==========================================
+      - name: (RPM) Create structure & Download
         run: |
-          cp public.asc repo/public.asc
+          mkdir -p rpm_repo
+          
+          RELEASE_DATA=$(curl -s "https://api.github.com/repos/$SOURCE_REPO/releases/latest")
+          RPMS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | endswith(".rpm")) | .browser_download_url')
 
-      - name: Create installation instructions
+          if [ -n "$RPMS" ]; then
+            cd rpm_repo
+            for url in $RPMS; do 
+              echo "Downloading $url"
+              curl -L -O "$url"
+            done
+          else
+            echo "No RPM files found."
+          fi
+
+      - name: (RPM) Sign Packages
+        run: |
+          cd rpm_repo
+          if ls *.rpm 1> /dev/null 2>&1; then
+            ../sign-rpm.exp *.rpm
+          fi
+
+      - name: (RPM) Generate Metadata
+        run: |
+          createrepo_c rpm_repo/
+
+      - name: (RPM) Generate .repo file
+        run: |
+          cat <<EOF > rpm_repo/xxanqw.repo
+          [xxanqw]
+          name=xxanqw's Repository
+          baseurl=https://apt.xxanqw.pp.ua/rpm/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://apt.xxanqw.pp.ua/public.asc
+          repo_gpgcheck=0
+          EOF
+
+      # ==========================================
+      # SECTION: DEPLOYMENT
+      # ==========================================
+      - name: Copy public key
+        run: cp public.asc repo/public.asc
+
+      - name: Create Landing Page
         run: |
           cat > repo/index.html <<'EOF'
           <!DOCTYPE html>
           <html lang="en">
           <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>xxanqw's APT Repository</title>
+            <title>xxanqw's Repository</title>
             <style>
-              body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+              body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
               pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; overflow-x: auto; }
-              code { font-family: monospace; }
             </style>
           </head>
           <body>
-          <h1>xxanqw's APT Repository</h1>
-          <p>To install packages from this repository, run the following commands:</p>
+          <h1>xxanqw's Repository</h1>
+          
+          <h3>Debian / Ubuntu</h3>
           <pre>
-          # 1. Add the GPG Key
-          wget -O - https://apt.xxanqw.pp.ua/public.asc | sudo gpg --dearmor -o /usr/share/keyrings/xxanqw-archive-keyring.gpg
+          wget -O - https://apt.xxanqw.pp.ua/public.asc | sudo gpg --dearmor -o /usr/share/keyrings/xxanqw.gpg
+          echo "deb [signed-by=/usr/share/keyrings/xxanqw.gpg] https://apt.xxanqw.pp.ua/repo stable main" | sudo tee /etc/apt/sources.list.d/xxanqw.list
+          sudo apt update && sudo apt install mikusays
+          </pre>
 
-          # 2. Add the Repository
-          echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/xxanqw-archive-keyring.gpg] https://apt.xxanqw.pp.ua/repo stable main" | sudo tee /etc/apt/sources.list.d/xxanqw.list
-
-          # 3. Update and Install
-          sudo apt update
-          sudo apt install mikusays
+          <h3>Fedora / RHEL / CentOS</h3>
+          <pre>
+          sudo dnf config-manager --add-repo https://apt.xxanqw.pp.ua/rpm/xxanqw.repo
+          sudo dnf install mikusays
           </pre>
           </body></html>
           EOF
 
-      - name: Prepare Pages structure
+      - name: Prepare Site Structure
         run: |
           mkdir _site
           mv repo _site/repo
+          mv rpm_repo _site/rpm
           cp _site/repo/index.html _site/index.html
           cp _site/repo/public.asc _site/public.asc
 
@@ -159,5 +205,4 @@ jobs:
           path: '_site'
 
       - name: Deploy to GitHub Pages
-        id: deployment
         uses: actions/deploy-pages@v4
