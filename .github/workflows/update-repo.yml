@@ -64,13 +64,25 @@ jobs:
             echo "Downloading: $url"
             curl -L -O "$url"
           done
+          
+          echo "--- DEBUG: Downloaded Files ---"
+          ls -lh
+          echo "-------------------------------"
 
       - name: Generate Packages files
         run: |
           cd repo
-          dpkg-scanpackages --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
+          
+          # Using -m (multivers) ensures that even if arch doesn't perfectly match, it gets indexed.
+          # We scan the SAME pool for both architectures to ensure visibility.
+          
+          echo "Generating AMD64 index..."
+          dpkg-scanpackages -m pool/ > dists/stable/main/binary-amd64/Packages
+          cat dists/stable/main/binary-amd64/Packages # Print to log for debugging
           gzip -kf dists/stable/main/binary-amd64/Packages
-          dpkg-scanpackages --arch arm64 pool/ > dists/stable/main/binary-arm64/Packages
+
+          echo "Generating ARM64 index..."
+          dpkg-scanpackages -m pool/ > dists/stable/main/binary-arm64/Packages
           gzip -kf dists/stable/main/binary-arm64/Packages
 
       - name: Generate Release file
@@ -103,7 +115,6 @@ jobs:
           cp public.asc repo/public.asc
 
       - name: Create installation instructions
-        # Updated with the new apt.xxanqw.pp.ua URLs
         run: |
           cat > repo/index.html <<'EOF'
           <!DOCTYPE html>
@@ -136,7 +147,6 @@ jobs:
           EOF
 
       - name: Prepare Pages structure
-        # This step is CRITICAL to prevent 404 errors on the /repo path
         run: |
           mkdir _site
           mv repo _site/repo
