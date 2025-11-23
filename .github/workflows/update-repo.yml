@@ -26,7 +26,6 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # Removed 'expect' and 'tcl-expect', added 'gpg-agent'
           sudo apt-get install -y dpkg-dev apt-utils gnupg2 gpg-agent curl jq rpm createrepo-c
 
       - name: Import GPG key & Preset Passphrase
@@ -34,27 +33,23 @@ jobs:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          # 1. Setup GPG Home
           export GNUPGHOME="${HOME}/.gnupg"
           echo "GNUPGHOME=$GNUPGHOME" >> $GITHUB_ENV
           mkdir -p "$GNUPGHOME"
           chmod 700 "$GNUPGHOME"
 
-          # 2. Import Key
+          # Import Key
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
 
-          # 3. Configure Agent to allow presetting (no loopback config needed for RPM)
+          # Configure Agent
           echo "allow-preset-passphrase" >> "$GNUPGHOME/gpg-agent.conf"
           
-          # Restart agent to apply config
+          # Restart agent
           gpgconf --kill gpg-agent || true
           gpgconf --launch gpg-agent || true
 
-          # 4. Extract Keygrip (internal ID used by the agent)
+          # Extract Keygrip and Preset
           KEYGRIP=$(gpg --list-secret-keys --with-colons | grep '^grp:' | awk -F: '{print $10}' | head -n 1)
-          
-          # 5. Preset the passphrase
-          # Find the preset helper (location varies by distro)
           PRESET_CMD=$(find /usr -name gpg-preset-passphrase -type f -executable -print -quit)
           
           if [ -z "$PRESET_CMD" ]; then
@@ -62,10 +57,9 @@ jobs:
             exit 1
           fi
           
-          echo "Presetting passphrase for keygrip..."
           "$PRESET_CMD" --preset --passphrase "$GPG_PASSPHRASE" "$KEYGRIP"
 
-          # 6. Configure RPM macros to use this GPG setup
+          # Configure RPM macros
           echo "%_signature gpg" > ~/.rpmmacros
           echo "%_gpg_name $GPG_KEY_ID" >> ~/.rpmmacros
           echo "%_gpg_path $GNUPGHOME" >> ~/.rpmmacros
@@ -115,7 +109,6 @@ jobs:
           EOF
           apt-ftparchive -c apt-ftparchive.conf release . > Release
           
-          # Note: pinentry-mode loopback is fine here for GPG direct calls
           gpg --batch --yes --default-key "$GPG_KEY_ID" --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --armor --detach-sign --output Release.gpg Release
           gpg --batch --yes --default-key "$GPG_KEY_ID" --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --clearsign --output InRelease Release
 
@@ -143,7 +136,6 @@ jobs:
         run: |
           cd rpm_repo
           if ls *.rpm 1> /dev/null 2>&1; then
-            # Password is already loaded in agent, so this runs without prompt
             rpmsign --addsign *.rpm
           fi
 
@@ -170,6 +162,7 @@ jobs:
         run: cp public.asc repo/public.asc
 
       - name: Create Landing Page
+        # UPDATED: Uses universal 'curl' command instead of specific dnf flags
         run: |
           cat > repo/index.html <<'EOF'
           <!DOCTYPE html>
@@ -194,7 +187,10 @@ jobs:
 
           <h3>Fedora / RHEL / CentOS</h3>
           <pre>
-          sudo dnf config-manager --add-repo https://apt.xxanqw.pp.ua/rpm/xxanqw.repo
+          # 1. Add the Repository
+          sudo curl -o /etc/yum.repos.d/xxanqw.repo https://apt.xxanqw.pp.ua/rpm/xxanqw.repo
+
+          # 2. Install
           sudo dnf install mikusays
           </pre>
           </body></html>
