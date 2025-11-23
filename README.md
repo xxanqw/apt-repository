@@ -8,6 +8,6 @@ sudo apt update && sudo apt install mikusays
 ```
 ### Fedora / RHEL / CentOS
 ```bash
-sudo dnf config-manager --add-repo https://apt.xxanqw.pp.ua/rpm/xxanqw.repo
+sudo curl -o /etc/yum.repos.d/xxanqw.repo https://apt.xxanqw.pp.ua/rpm/xxanqw.repo
 sudo dnf install mikusays
 ```
