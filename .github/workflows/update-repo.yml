@@ -187,10 +187,7 @@ jobs:
 
           <h3>Fedora / RHEL / CentOS</h3>
           <pre>
-          # 1. Add the Repository
           sudo curl -o /etc/yum.repos.d/xxanqw.repo https://apt.xxanqw.pp.ua/rpm/xxanqw.repo
-
-          # 2. Install
           sudo dnf install mikusays
           </pre>
           </body></html>
