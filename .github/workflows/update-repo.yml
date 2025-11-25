@@ -3,7 +3,7 @@ name: Update Repositories (APT & RPM)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */24 * * *'
   repository_dispatch:
     types: [new-release]
 
